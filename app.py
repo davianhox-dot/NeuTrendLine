@@ -52,55 +52,65 @@ TF_CFG = {"1W": {"interval": "1wk", "period": "10y"},
           "1M": {"interval": "1mo", "period": "max"}}
 
 # ----------------------- Universum -----------------------
+import requests
+
+def read_html_ua(url):
+    """Wikipedia & Co. blocken Anfragen ohne Browser-Header -> mit User-Agent laden."""
+    r = requests.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                     timeout=20)
+    r.raise_for_status()
+    return pd.read_html(io.StringIO(r.text))
+
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_universe(choice: str):
     tickers = set()
+    errors = []
     try:
-        sp500 = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
+        sp500 = read_html_ua("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")[0]
         tickers.update(sp500["Symbol"].str.replace(".", "-", regex=False))
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"S&P 500: {e}")
     tickers.update(["BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
                     "ADA-USD", "DOGE-USD", "AVAX-USD", "LINK-USD", "DOT-USD",
                     "LTC-USD", "ATOM-USD", "NEAR-USD", "ARB-USD", "INJ-USD"])
     if choice.startswith("Schnell"):
-        return sorted(tickers)
+        return sorted(tickers), errors
 
     try:
-        for t in pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100"):
+        for t in read_html_ua("https://en.wikipedia.org/wiki/Nasdaq-100"):
             if "Ticker" in t.columns:
                 tickers.update(t["Ticker"]); break
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"NASDAQ-100: {e}")
     for page in ["DAX", "MDAX", "SDAX"]:
         try:
-            for t in pd.read_html(f"https://en.wikipedia.org/wiki/{page}"):
+            for t in read_html_ua(f"https://en.wikipedia.org/wiki/{page}"):
                 col = next((c for c in t.columns if "icker" in str(c) or "ymbol" in str(c)), None)
                 if col is not None and len(t) > 20:
                     syms = t[col].dropna().astype(str)
                     tickers.update(s if s.endswith(".DE") else s + ".DE" for s in syms)
                     break
-        except Exception:
-            pass
+        except Exception as e:
+            errors.append(f"{page}: {e}")
     if choice.startswith("Mittel"):
-        return sorted(tickers)
+        return sorted(tickers), errors
 
     # Voll: alle US-Listings
     try:
         nq = pd.read_csv("https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt", sep="|")
         nq = nq[(nq["Test Issue"] == "N") & (nq["ETF"] == "N")]
         tickers.update(nq["Symbol"].dropna())
-    except Exception:
-        pass
+    except Exception as e:
+        errors.append(f"NASDAQ-Liste: {e}")
     try:
         ot = pd.read_csv("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt", sep="|")
         ot = ot[(ot["Test Issue"] == "N") & (ot["ETF"] == "N")]
         syms = ot["ACT Symbol"].dropna()
         syms = syms[~syms.str.contains(r"[\$\.]")]
         tickers.update(syms.str.replace("/", "-"))
-    except Exception:
-        pass
-    return sorted(t for t in tickers if isinstance(t, str) and t.strip())
+    except Exception as e:
+        errors.append(f"NYSE-Liste: {e}")
+    return sorted(t for t in tickers if isinstance(t, str) and t.strip()), errors
 
 # ----------------------- Trendlinien-Logik -----------------------
 def find_pivot_lows(low: pd.Series, window: int):
@@ -293,7 +303,12 @@ params = {"max_dist": max_dist, "min_bounce": min_bounce,
 c_start, c_stop, c_reset = st.columns(3)
 if c_start.button("🚀 Scan starten / fortsetzen", type="primary", use_container_width=True):
     if st.session_state.universe is None:
-        st.session_state.universe = get_universe(universe_choice)
+        uni, errs = get_universe(universe_choice)
+        st.session_state.universe = uni
+        for e in errs:
+            st.warning(f"Quelle fehlgeschlagen: {e}")
+        if len(uni) < 50:
+            st.error("Universum verdächtig klein – Listen-Abruf prüfen (Warnungen oben).")
         st.session_state.pos = 0
         st.session_state.hits = []
     st.session_state.running = True
