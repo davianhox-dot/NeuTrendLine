@@ -43,6 +43,9 @@ universe_choice = st.sidebar.selectbox(
      "Voll: Alle NASDAQ + NYSE + DE + Krypto (~8000, dauert Stunden!)"])
 
 timeframes = st.sidebar.multiselect("Timeframes", ["1W", "1M"], default=["1W", "1M"])
+batch_size = st.sidebar.select_slider("Chargengröße", [100, 250, 500, 1000], value=500)
+auto_cont  = st.sidebar.checkbox("Automatisch weiterscannen", value=True,
+                                 help="Nach jeder Charge automatisch die nächste starten. Treffer erscheinen trotzdem sofort.")
 
 PIVOT_WINDOW = 3
 TF_CFG = {"1W": {"interval": "1wk", "period": "10y"},
@@ -277,25 +280,64 @@ st.caption("Findet Aktien & Kryptos nahe langfristiger Support-Trendlinien mit m
 
 if "hits" not in st.session_state:
     st.session_state.hits = []
+if "universe" not in st.session_state:
+    st.session_state.universe = None
+if "pos" not in st.session_state:
+    st.session_state.pos = 0
+if "running" not in st.session_state:
+    st.session_state.running = False
 
-if st.button("🚀 Scan starten", type="primary", use_container_width=True):
-    params = {"max_dist": max_dist, "min_bounce": min_bounce,
-              "touch_tol": touch_tol, "break_tol": break_tol, "min_price": min_price}
-    universe = get_universe(universe_choice)
-    st.info(f"Scanne {len(universe)} Ticker × {len(timeframes)} Timeframes …")
-    progress = st.progress(0.0)
+params = {"max_dist": max_dist, "min_bounce": min_bounce,
+          "touch_tol": touch_tol, "break_tol": break_tol, "min_price": min_price}
+
+c_start, c_stop, c_reset = st.columns(3)
+if c_start.button("🚀 Scan starten / fortsetzen", type="primary", use_container_width=True):
+    if st.session_state.universe is None:
+        st.session_state.universe = get_universe(universe_choice)
+        st.session_state.pos = 0
+        st.session_state.hits = []
+    st.session_state.running = True
+if c_stop.button("⏸️ Pause", use_container_width=True):
+    st.session_state.running = False
+if c_reset.button("🔄 Zurücksetzen", use_container_width=True):
+    st.session_state.universe = None
+    st.session_state.pos = 0
+    st.session_state.hits = []
+    st.session_state.running = False
+
+uni = st.session_state.universe
+if uni is not None:
+    total = len(uni)
+    done = st.session_state.pos
+    st.progress(done / total if total else 0.0,
+                text=f"Fortschritt: {done}/{total} Ticker · {len(st.session_state.hits)} Treffer bisher")
+
+if st.session_state.running and uni is not None and st.session_state.pos < len(uni):
+    start = st.session_state.pos
+    end = min(start + batch_size, len(uni))
+    batch = uni[start:end]
+    st.info(f"Scanne Charge {start + 1}–{end} von {len(uni)} …")
+    bar = st.progress(0.0)
     status = st.empty()
-    hits = []
-    for k, ticker in enumerate(universe):
+    for k, ticker in enumerate(batch):
         for tf in timeframes:
             hit = scan_ticker(ticker, tf, params)
             if hit:
-                hits.append(hit)
+                st.session_state.hits.append(hit)
                 status.success(f"Treffer: {ticker} ({tf}) {hit['dist']:+.1f}% | {hit['bounces']} Bounces")
-        progress.progress((k + 1) / len(universe))
-    hits.sort(key=lambda h: abs(h["dist"]))
-    st.session_state.hits = hits
-    progress.empty()
+        bar.progress((k + 1) / len(batch))
+    st.session_state.pos = end
+    st.session_state.hits.sort(key=lambda h: abs(h["dist"]))
+    bar.empty()
+    if st.session_state.pos >= len(uni):
+        st.session_state.running = False
+        st.success("✅ Scan komplett abgeschlossen!")
+        st.rerun()
+    elif auto_cont:
+        st.rerun()       # naechste Charge automatisch, Treffer unten schon sichtbar
+    else:
+        st.session_state.running = False
+        st.rerun()
 
 hits = st.session_state.hits
 if hits:
@@ -350,4 +392,5 @@ if hits:
             else:
                 st.caption("Keine Analystendaten verfügbar (z. B. bei Kryptos).")
 else:
-    st.write("Noch keine Ergebnisse. Einstellungen links wählen und **Scan starten** drücken.")
+    st.write("Noch keine Ergebnisse. Einstellungen links wählen und **Scan starten** drücken. "
+             "Der Scan läuft in Chargen — Treffer erscheinen schon während des Scans und du kannst jederzeit pausieren.")
