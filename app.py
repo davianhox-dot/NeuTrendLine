@@ -30,6 +30,12 @@ st.set_page_config(page_title="Trendline Scanner", page_icon="📉", layout="wid
 
 # ----------------------- Sidebar / Einstellungen -----------------------
 st.sidebar.title("⚙️ Einstellungen")
+scan_mode = st.sidebar.radio(
+    "Scan-Modus",
+    ["Viele Bounces (UiPath-Stil)", "Starke lange Linien (ServiceNow/Salesforce-Stil)"],
+    help="Starke Linien: wenige Touches reichen, aber die Linie muss einen Großteil "
+         "der Historie überspannen, nie gebrochen sein und aufwärts zeigen. "
+         "Ideal nach starkem Abverkauf in eine jahrelange Trendlinie.")
 max_dist   = st.sidebar.slider("Max. Distanz zur Linie (%)", 1.0, 15.0, 5.0, 0.5)
 min_bounce = st.sidebar.slider("Min. Anzahl Bounces", 2, 6, 3)
 touch_tol  = st.sidebar.slider("Touch-Toleranz (%)", 0.5, 5.0, 2.0, 0.5)
@@ -118,27 +124,36 @@ def find_pivot_lows(low: pd.Series, window: int):
     return [i for i in range(window, len(vals) - window)
             if vals[i] == vals[i - window:i + window + 1].min()]
 
-def best_trendline(df, min_bounces, touch_tol_pct, break_tol_pct):
+def best_trendline(df, min_bounces, touch_tol_pct, break_tol_pct, strong_mode=False):
+    """strong_mode: ServiceNow/Salesforce-Muster – Linie muss >=60% der Historie
+    überspannen, aufwärts gerichtet sein und nie gebrochen; 2 Touches reichen.
+    Sonst: UiPath-Muster – viele Bounces (min_bounces) zählen."""
     lows, closes = df["Low"].values, df["Close"].values
     pivots = find_pivot_lows(df["Low"], PIVOT_WINDOW)
     if len(pivots) < 2:
         return None
+    n = len(df)
+    min_span = int(n * 0.6) if strong_mode else 10
+    req_bounces = 2 if strong_mode else min_bounces
     best = None
     for i, j in itertools.combinations(pivots, 2):
-        if j - i < 10:
+        if j - i < min_span:
             continue
         slope = (lows[j] - lows[i]) / (j - i)
+        if strong_mode and slope <= 0:        # nur aufsteigende Linien
+            continue
         intercept = lows[i] - slope * i
-        line = slope * np.arange(len(df)) + intercept
+        line = slope * np.arange(n) + intercept
         if (line <= 0).any():
             continue
         if (closes[i:] < line[i:] * (1 - break_tol_pct / 100)).any():
             continue
         touches = [p for p in pivots
                    if p >= i and abs(lows[p] - line[p]) / line[p] * 100 <= touch_tol_pct]
-        if len(touches) < min_bounces:
+        if len(touches) < req_bounces:
             continue
-        score = (len(touches), j - i)
+        # Starker Modus: Linienlänge zählt mehr als Touch-Anzahl
+        score = (j - i, len(touches)) if strong_mode else (len(touches), j - i)
         if best is None or score > best[0]:
             best = (score, slope, intercept, touches)
     return None if best is None else best[1:]
@@ -157,7 +172,8 @@ def scan_ticker(ticker, tf, params):
     df = df.dropna()
     if len(df) < 60 or float(df["Close"].iloc[-1]) < params["min_price"]:
         return None
-    res = best_trendline(df, params["min_bounce"], params["touch_tol"], params["break_tol"])
+    res = best_trendline(df, params["min_bounce"], params["touch_tol"],
+                         params["break_tol"], strong_mode=params["strong"])
     if res is None:
         return None
     slope, intercept, touches = res
@@ -167,6 +183,11 @@ def scan_ticker(ticker, tf, params):
     dist = (price - line_now) / line_now * 100
     if dist < -params["break_tol"] or dist > params["max_dist"]:
         return None
+    if params["strong"]:
+        # Muster-Check: Kurs kommt nach deutlichem Abverkauf von oben in die Linie
+        recent_high = float(df["High"].iloc[-24:].max())
+        if recent_high < price * 1.25:        # min. ~25% Drawdown vom Hoch
+            return None
     return {"ticker": ticker, "tf": tf, "price": price, "line": float(line_now),
             "dist": float(dist), "bounces": len(touches),
             "df": df, "slope": slope, "intercept": intercept, "touches": touches}
@@ -298,7 +319,8 @@ if "running" not in st.session_state:
     st.session_state.running = False
 
 params = {"max_dist": max_dist, "min_bounce": min_bounce,
-          "touch_tol": touch_tol, "break_tol": break_tol, "min_price": min_price}
+          "touch_tol": touch_tol, "break_tol": break_tol, "min_price": min_price,
+          "strong": scan_mode.startswith("Starke")}
 
 c_start, c_stop, c_reset = st.columns(3)
 if c_start.button("🚀 Scan starten / fortsetzen", type="primary", use_container_width=True):
